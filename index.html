@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>AnimeTM - Top Anime Streaming</title>
+  <meta name="description"
+    content="AnimeTM - Watch the latest and greatest anime. Stream top-rated shows, movies, and exclusive content. Powered by AniList.">
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; connect-src 'self' http://localhost:3001 https://graphql.anilist.co https://corsproxy.io https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: https:; frame-src https://www.youtube.com https://megaplay.buzz; font-src 'self' https://fonts.gstatic.com data:;">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swiper@11.1.1/swiper-bundle.min.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+  <nav id="main-nav">
+    <div class="nav-inner">
+      <a href="#" class="logo" id="logo">
+        <span class="logo-anime">ANIME</span><span class="logo-tm">TM</span>
+      </a>
+      <ul class="nav-links" id="nav-links">
+        <li><a href="#" class="nav-link active" data-category="home">Home</a></li>
+        <li><a href="#" class="nav-link" data-category="movie">Movies</a></li>
+        <li><a href="#" class="nav-link" data-category="tv">TV Series</a></li>
+        <li><a href="#" class="nav-link" data-category="airing">Top Airing</a></li>
+        <li><a href="#" class="nav-link" data-category="bypopularity">Most Popular</a></li>
+        <li><a href="#" class="nav-link" data-category="watchlist">Watchlist</a></li>
+      </ul>
+      <div class="nav-actions">
+        <button class="search-btn" id="search-btn" aria-label="Search">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+        </button>
+        <button class="menu-btn" id="menu-btn" aria-label="Menu">
+          <span></span><span></span><span></span>
+        </button>
+      </div>
+    </div>
+  </nav>
+  <div class="mobile-nav-menu" id="mobile-nav-menu">
+    <a href="#" class="mobile-nav-link active" data-category="home">Home</a>
+    <a href="#" class="mobile-nav-link" data-category="movie">Movies</a>
+    <a href="#" class="mobile-nav-link" data-category="tv">TV Series</a>
+    <a href="#" class="mobile-nav-link" data-category="airing">Top Airing</a>
+    <a href="#" class="mobile-nav-link" data-category="bypopularity">Most Popular</a>
+    <a href="#" class="mobile-nav-link" data-category="watchlist">Watchlist</a>
+  </div>
+  <div class="search-overlay" id="search-overlay">
+    <div class="search-container">
+      <div class="search-input-wrapper">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8" />
+          <line x1="21" y1="21" x2="16.65" y2="16.65" />
+        </svg>
+        <input type="text" id="search-input" placeholder="Search anime..." autocomplete="off" spellcheck="false">
+        <button class="search-close" id="search-close" aria-label="Close search">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </div>
+      <div id="search-results" class="search-results">
+        <p class="search-hint">Start typing to search AniList...</p>
+      </div>
+    </div>
+  </div>
+  <div class="detail-modal" id="detail-modal">
+    <button class="detail-close-btn" id="detail-close" aria-label="Close details">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="18" y1="6" x2="6" y2="18" />
+        <line x1="6" y1="6" x2="18" y2="18" />
+      </svg>
+    </button>
+    <div class="detail-modal-inner" id="detail-content">
+    </div>
+  </div>
+  <div class="watch-modal" id="watch-modal">
+    <div class="watch-header">
+      <button class="watch-back-btn" id="watch-close" aria-label="Go back">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="15 18 9 12 15 6" />
+        </svg>
+      </button>
+      <div class="watch-header-info">
+        <h3 class="watch-title" id="watch-title">Loading...</h3>
+        <span class="watch-ep-badge" id="watch-ep-label">Episode 1</span>
+      </div>
+      <div class="watch-header-actions">
+        <div class="lang-toggle" id="lang-toggle">
+          <button class="lang-btn active" data-lang="sub" id="lang-sub">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M2 4v13h6l4 4 4-4h6V4H2zm18 11h-4.83L12 18.17 8.83 15H4V6h16v9z" />
+            </svg>
+            SUB
+          </button>
+          <button class="lang-btn" data-lang="dub" id="lang-dub">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="23" />
+            </svg>
+            DUB
+          </button>
+        </div>
+      </div>
+    </div>
+    <div class="watch-body">
+      <div class="watch-main">
+        <div class="watch-player">
+          <div id="artplayer" style="width: 100%; height: 100%;"></div>
+        </div>
+        <div class="player-controls-bar">
+          <div class="p-control-item" id="ctrl-focus" title="Focus Mode"><svg width="14" height="14" viewBox="0 0 24 24"
+              fill="none" stroke="currentColor" stroke-width="2">
+              <path
+                d="M12 3v1M12 20v1M4.22 4.22l.7.7M18.36 18.36l.7.7M1 12h1M22 12h1M4.22 19.78l.7-.7M18.36 5.64l.7-.7" />
+            </svg>Focus</div>
+          <div class="p-control-item active" id="ctrl-autonext" title="Next episode starts automatically"><svg
+              width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M5 4l10 8-10 8V4zM19 4h2v16h-2V4z" />
+            </svg>AutoNext</div>
+          <div class="p-control-item" id="ctrl-autoplay" title="Autoplay video"><svg width="14" height="14"
+              viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z" />
+            </svg>AutoPlay</div>
+          <div class="p-control-item" id="ctrl-autoskip" title="Skip openers/closers"><svg width="14" height="14"
+              viewBox="0 0 24 24" fill="currentColor">
+              <path d="M15 12l-10-8v16l10-8zm-5 4.81l6.01-4.81L10 7.19v9.62zM15 4h2v16h-2V4z" />
+            </svg>AutoSkip</div>
+          <div class="p-control-item" id="ctrl-skiptime"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>Add Skiptime</div>
+          <div class="p-control-item" id="ctrl-prev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2">
+              <polyline points="15 18 9 12 15 6" />
+            </svg>Prev</div>
+          <div class="p-control-item" id="ctrl-next"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2">
+              <polyline points="9 18 15 12 9 6" />
+            </svg>Next</div>
+          <div class="p-control-item" id="ctrl-bookmark"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2">
+              <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+            </svg>Bookmark</div>
+        </div>
+        <div id="watch-player-meta" class="watch-player-meta">
+          <div class="watch-meta-alert">
+            <h4 id="watch-current-ep-alert">You are watching Episode 1</h4>
+            <p>If the current server is not working, please try switching to other servers.</p>
+          </div>
+          <div class="watch-seasons-block" id="watch-seasons-block" style="display: none;">
+            <h3>Seasons</h3>
+            <div class="watch-seasons-grid" id="watch-seasons-grid">
+            </div>
+          </div>
+        </div>
+      </div>
+      <aside class="watch-sidebar">
+        <div class="ws-tabs">
+          <button class="ws-tab active" data-tab="episodes">Episodes</button>
+          <button class="ws-tab" data-tab="about">About</button>
+        </div>
+        <div class="ws-content">
+          <div class="ws-panel active" id="ws-panel-episodes">
+            <div class="ws-ep-tools">
+              <div class="ws-ep-search">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                  <circle cx="11" cy="11" r="8" />
+                  <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                </svg>
+                <input type="text" id="ws-ep-search-input" placeholder="Search episode...">
+              </div>
+              <div class="ws-ep-range" id="ws-ep-range">
+                <span>001-100</span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </div>
+            </div>
+            <div class="ws-ep-list" id="ws-ep-list">
+            </div>
+          </div>
+          <div class="ws-panel" id="ws-panel-about">
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+  <section id="hero" class="hero">
+    <!-- Full-height Background Character Poster -->
+    <div class="hero-bg" id="hero-bg" style="background-color: #000000;">
+      <iframe class="hero-video-bg" width="815" height="458" src="https://www.youtube.com/embed/OFYF67NkO4w?autoplay=1&mute=1&loop=1&playlist=OFYF67NkO4w" title="Let the feelings come at shore !" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+      <div class="hero-overlay-gradient"></div>
+      <div class="hero-bottom-gradient"></div>
+    </div>
+    <div class="hero-content" id="hero-content">
+      <div class="hero-badge">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+        </svg>
+        <span>#1 Trending</span>
+      </div>
+      <div class="skeleton skeleton-hero-title"></div>
+      <div class="skeleton skeleton-hero-desc"></div>
+      <div class="skeleton skeleton-hero-desc" style="width:30%"></div>
+    </div>
+  </section>
+  <section class="top10-section" id="top10-section">
+    <div class="section-relative">
+      <div class="homewrapper">
+        <div class="top10-header">
+          <h3 class="top10-number" id="top10-heading">
+            <span class="letter letter-shadow-r first-letter">T</span><span class="letter letter-shadow-r">O</span><span
+              class="letter letter-shadow-r letter-p">P</span><span
+              class="letter letter-shadow-r letter-1">1</span><span class="letter letter-shadow-r letter-0">0</span>
+          </h3>
+          <div class="top10-labels">
+            <h3 class="top10-label">SEASONAL</h3>
+            <h3 class="top10-label">ANIME</h3>
+          </div>
+        </div>
+      </div>
+      <div class="top10-carousel">
+        <div class="swiper top10-swiper" id="top10-swiper">
+          <div class="swiper-wrapper" id="top10-wrapper">
+          </div>
+          <div class="swiper-nav-prev" id="top10-prev"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="15 18 9 12 15 6" />
+            </svg></div>
+          <div class="swiper-nav-next" id="top10-next"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="9 18 15 12 9 6" />
+            </svg></div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <section class="continue-section" id="continue-section" style="display: none;">
+    <div class="homewrapper">
+      <div class="section-header">
+        <h2 class="section-title">
+          <span class="title-accent"></span>
+          Continue Watching
+        </h2>
+        <a href="#" class="view-all" id="clear-history">Clear All</a>
+      </div>
+    </div>
+    <div class="swiper continue-swiper" id="continue-swiper">
+      <div class="swiper-wrapper" id="continue-wrapper">
+      </div>
+      <div class="swiper-nav-prev" id="continue-prev"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2.5">
+          <polyline points="15 18 9 12 15 6" />
+        </svg></div>
+      <div class="swiper-nav-next" id="continue-next"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2.5">
+          <polyline points="9 18 15 12 9 6" />
+        </svg></div>
+    </div>
+  </section>
+  <section class="trending-section" id="trending-section">
+    <div class="homewrapper">
+      <div class="section-header">
+        <h2 class="section-title" id="trending-title">
+          <span class="title-accent"></span>
+          Trending Now
+        </h2>
+        <a href="#" class="view-all" id="view-all-trending">View All &rarr;</a>
+      </div>
+    </div>
+    <div class="swiper trending-swiper" id="trending-swiper">
+      <div class="swiper-wrapper" id="trending-wrapper">
+      </div>
+      <div class="swiper-nav-prev" id="trending-prev"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="15 18 9 12 15 6" />
+        </svg></div>
+      <div class="swiper-nav-next" id="trending-next"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="9 18 15 12 9 6" />
+        </svg></div>
+    </div>
+  </section>
+  <section class="latest-section" id="latest-section">
+    <div class="homewrapper">
+      <div class="section-header">
+        <h2 class="section-title" id="latest-title">
+          <span class="title-accent"></span>
+          This Season
+        </h2>
+        <a href="#" class="view-all" id="view-all-latest">View All &rarr;</a>
+      </div>
+    </div>
+    <div class="swiper latest-swiper" id="latest-swiper">
+      <div class="swiper-wrapper" id="latest-wrapper">
+      </div>
+      <div class="swiper-nav-prev" id="latest-prev"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="15 18 9 12 15 6" />
+        </svg></div>
+      <div class="swiper-nav-next" id="latest-next"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="9 18 15 12 9 6" />
+        </svg></div>
+    </div>
+  </section>
+  <section class="browse-section" id="browse-section" style="display: none;">
+    <div class="homewrapper">
+      <div class="section-header">
+        <h2 class="section-title" id="browse-title">
+          <span class="title-accent"></span>
+          Browse
+        </h2>
+      </div>
+      <div class="browse-grid" id="browse-grid">
+      </div>
+      <div class="browse-loader" id="browse-loader" style="display: none;">
+        <div class="spinner"></div>
+        <p>Loading more...</p>
+      </div>
+      <div id="browse-sentinel" style="height: 1px;"></div>
+    </div>
+  </section>
+  <footer id="footer">
+    <div class="footer-watermark">ANIME</div>
+    <div class="homewrapper">
+      <div class="footer-inner">
+        <div class="footer-brand">
+          <a href="#" class="logo">
+            <span class="logo-anime">ANIME</span><span class="logo-tm">TM</span>
+          </a>
+          <p class="footer-desc">Experience the pinnacle of anime streaming. Premium quality, curated content, and a
+            cinematic interface designed for true fans.</p>
+        </div>
+        <div class="footer-links-grid">
+          <div class="footer-links-group">
+            <h4>Explore</h4>
+            <ul>
+              <li><a href="#">New Releases</a></li>
+              <li><a href="#">Popular Series</a></li>
+              <li><a href="#">Movies</a></li>
+              <li><a href="#">Collections</a></li>
+            </ul>
+          </div>
+          <div class="footer-links-group">
+            <h4>Support</h4>
+            <ul>
+              <li><a href="#">FAQ</a></li>
+              <li><a href="#">Community</a></li>
+              <li><a href="#">Contact</a></li>
+              <li><a href="#">Terms</a></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <div class="footer-copyright">
+          <p>&copy; 2026 AnimeTM. All rights reserved.</p>
+          <p class="mal-credit">Powered by <a href="https://anilist.co" target="_blank" rel="noopener">AniList</a></p>
+        </div>
+      </div>
+    </div>
+  </footer>
+  <script src="https://cdn.jsdelivr.net/npm/swiper@11.1.1/swiper-bundle.min.js"></script>
+  <script src="mal-api.js"></script>
+  <script src="script.js"></script>
+</body>
+
+</html>
