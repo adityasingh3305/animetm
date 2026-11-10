@@ -3,34 +3,104 @@
 //  Runs on http://localhost:3001
 //  Forwards all requests to MAL API with Client ID auth
 // ============================================================
-
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const compression = require('compression');
+const rateLimit = require('express-rate-limit');
+const { LRUCache } = require('lru-cache');
+const helmet = require('helmet');
+const path = require('path');
+const { normalize, getPagination, getCurrentSeason, getAiringEpisode, distillAnizipArtwork, distillAnizip, buildEpisodeList, STATUS_MAP } = require('./server-utils');
+const { aggregateRelatedSeries } = require('./relation-service');
+const relationOverrides = require('./relation-overrides.json');
 
+// ─── Configuration & Constants ────────────────────────────────
+const CONFIG = {
+  PORT: process.env.PORT || 3001,
+  MAL_BASE: 'https://api.myanimelist.net/v2',
+  ANIZIP_BASE: 'https://api.ani.zip',
+  MAL_CLIENT_ID: (process.env.MAL_CLIENT_ID || '').trim(),
+  FETCH_TIMEOUT: 10000,
+  // AniZip payloads can be ~1.9MB (long-running shows), so allow more time.
+  ANIZIP_TIMEOUT: 20000,
+  CACHE_MAX_SIZE: 200,
+  CACHE_TTL: 5 * 60 * 1000, // 5 minutes
+  RATE_LIMIT_WINDOW: 60 * 1000, // 1 minute
+  RATE_LIMIT_MAX: 100,
+  ALLOWED_ORIGINS: (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://localhost:3001,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5500,http://localhost:5500')
+    .split(',').map(o => o.trim()).filter(Boolean)
+};
+
+const FIELDS = {
+  STANDARD: [
+    'id', 'title', 'main_picture', 'alternative_titles',
+    'start_date', 'synopsis', 'mean', 'rank', 'popularity',
+    'num_episodes', 'status', 'genres', 'media_type',
+    'start_season', 'average_episode_duration', 'rating', 'source', 'end_date'
+  ].join(','),
+  RELATION: 'related_anime{relation_type,node{id,title,main_picture,alternative_titles,start_date,end_date,num_episodes,media_type,average_episode_duration}}',
+  RELATED: 'id,title,alternative_titles,main_picture,start_date,end_date,num_episodes,media_type,average_episode_duration,related_anime{relation_type,node{id,title,alternative_titles,main_picture,start_date,end_date,num_episodes,media_type,average_episode_duration}}'
+};
+
+// Enforce required environment variables
+if (!CONFIG.MAL_CLIENT_ID) {
+  console.error('\n  ❌  FATAL: MAL_CLIENT_ID environment variable is missing.');
+  console.error('      Please set it before running the server.\n');
+  process.exit(1);
+}
+
+// ─── App Setup & Middleware ───────────────────────────────────
 const app = express();
-const PORT = process.env.PORT || 3001;
 
-app.use(compression());
-
-// Serve static files from root directory
-app.use(express.static(__dirname));
-
-// Root route
-app.get('/', (_, res) => {
-  res.sendFile(__dirname + '/index.html');
+// Cache Instance
+const cache = new LRUCache({
+  max: CONFIG.CACHE_MAX_SIZE,
+  ttl: CONFIG.CACHE_TTL,
 });
 
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://localhost:3001,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5500,http://localhost:5500').split(',').map(o => o.trim()).filter(Boolean);
+const anikotoCache = new LRUCache({
+  max: 1000,
+  ttl: 24 * 60 * 60 * 1000, // 24 hours
+});
+
+// Stores the distilled episode array (not the raw ~MB AniZip payload)
+const anizipCache = new LRUCache({
+  max: 200,
+  ttl: 24 * 60 * 60 * 1000, // 24 hours
+});
+
+// Stores AniZip poster/banner artwork by MAL id. Artwork is shared by every
+// discovery/detail route so the UI consistently uses AniZip images.
+const anizipArtworkCache = new LRUCache({
+  max: 1000,
+  ttl: 24 * 60 * 60 * 1000, // 24 hours
+});
+
+// Stores normalized relationship graphs so opening the same franchise does
+// not refetch every MAL relation node for each details-page visit.
+const relatedSeriesCache = new LRUCache({
+  max: 200,
+  ttl: 6 * 60 * 60 * 1000, // 6 hours
+});
+
+app.use(helmet({
+  contentSecurityPolicy: false, // Managed in index.html
+  crossOriginEmbedderPolicy: false
+}));
+app.use(compression());
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.json({ limit: '50kb' }));
+
+// CORS configuration
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow all local dev origins, null (file://), hosting domains, or anything in the list
     if (!origin
-      || origin.startsWith('http://localhost')
-      || origin.startsWith('http://127.0.0.1')
-      || origin.endsWith('.onrender.com')
-      || origin.endsWith('.netlify.app')
-      || ALLOWED_ORIGINS.includes(origin)) {
+      || /^https?:\/\/localhost(:\d+)?$/.test(origin)
+      || /^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)
+      || /^https:\/\/[a-z0-9-]+\.onrender\.com$/.test(origin)
+      || /^https:\/\/[a-z0-9-]+\.netlify\.app$/.test(origin)
+      || CONFIG.ALLOWED_ORIGINS.includes(origin)) {
       callback(null, true);
     } else {
       callback(new Error('Origin not allowed by CORS'));
@@ -39,6 +109,7 @@ app.use(cors({
   credentials: true
 }));
 
+// CORS Error Handler
 app.use((err, req, res, next) => {
   if (err.message && err.message.includes('Origin not allowed')) {
     return res.status(403).json({ error: 'CORS not allowed' });
@@ -46,55 +117,19 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
-const MAL_BASE = 'https://api.myanimelist.net/v2';
-const MAL_CLIENT_ID = process.env.MAL_CLIENT_ID || '6114d00ca681b7701d1e15fe11a4987e';
+// Trust proxy for rate limiting behind load balancers
+app.set('trust proxy', 1);
 
-if (!MAL_CLIENT_ID) {
-  console.error('\n  ❌  FATAL: MAL_CLIENT_ID environment variable is missing.');
-  console.error('      Please set it before running the server.\n');
-  process.exit(1);
-}
+// Rate limiting
+app.use(rateLimit({
+  windowMs: CONFIG.RATE_LIMIT_WINDOW,
+  max: CONFIG.RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please slow down.' },
+}));
 
-const FETCH_TIMEOUT = 10000;
-const CACHE_MAX_SIZE = 200;
-const RATE_LIMIT_WINDOW = 60 * 1000;
-const RATE_LIMIT_MAX = 100;
-
-const STANDARD_FIELDS = [
-  'id', 'title', 'main_picture', 'alternative_titles',
-  'start_date', 'synopsis', 'mean', 'rank', 'popularity',
-  'num_episodes', 'status', 'genres', 'media_type',
-  'start_season', 'average_episode_duration', 'rating', 'source'
-].join(',');
-
-const RELATION_FIELDS = 'related_anime{relation_type,node{id,title,main_picture,alternative_titles,start_date,mean,num_episodes,status,genres,media_type,start_season,rating}}';
-
-// ─── Middleware ───────────────────────────────────────────────
-app.use(cors()); // Allow all origins
-app.use(express.json());
-
-// ─── MAL fetch helper ─────────────────────────────────────────
-const cache = new Map();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-const ipRequests = new Map();
-
-function rateLimit(req, res, next) {
-  const ip = req.ip || req.connection.remoteAddress || 'unknown';
-  const now = Date.now();
-  const record = ipRequests.get(ip);
-  if (record && now - record.windowStart < RATE_LIMIT_WINDOW) {
-    if (record.count >= RATE_LIMIT_MAX) {
-      return res.status(429).json({ error: 'Too many requests. Please slow down.' });
-    }
-    record.count++;
-  } else {
-    ipRequests.set(ip, { windowStart: now, count: 1 });
-  }
-  next();
-}
-
-app.use(express.json({ limit: '100kb' }));
-
+// Input validation middleware for GET requests
 app.use((req, res, next) => {
   if (req.method === 'GET') {
     for (const key in req.query) {
@@ -106,295 +141,461 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(rateLimit);
-
-function evictCache() {
-  if (cache.size >= CACHE_MAX_SIZE) {
-    let oldestKey = null;
-    let oldestTime = Infinity;
-    for (const [key, val] of cache) {
-      if (val.timestamp < oldestTime) {
-        oldestTime = val.timestamp;
-        oldestKey = key;
-      }
-    }
-    if (oldestKey) cache.delete(oldestKey);
-  }
-}
-
-async function malFetch(path, params = {}) {
+// ─── Helpers ──────────────────────────────────────────────────
+/**
+ * Executes a fetch request to the MAL API with caching and timeout.
+ * @param {string} path - The MAL API endpoint path
+ * @param {object} [params={}] - Query parameters
+ * @returns {Promise<object>} The JSON response from MAL
+ * @throws {Error} If the request fails or times out
+ */
+async function malFetch(path, params = {}, retries = 1) {
   const qs = new URLSearchParams(params).toString();
-  const url = `${MAL_BASE}${path}${qs ? '?' + qs : ''}`;
+  const url = `${CONFIG.MAL_BASE}${path}${qs ? '?' + qs : ''}`;
   const cacheKey = url;
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
 
-  if (cache.has(cacheKey)) {
-    const cached = cache.get(cacheKey);
-    if (Date.now() - cached.timestamp < CACHE_TTL) {
-      return cached.data;
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), CONFIG.FETCH_TIMEOUT);
+    try {
+      const res = await fetch(url, {
+        headers: {
+          'X-MAL-CLIENT-ID': CONFIG.MAL_CLIENT_ID,
+          'Accept': 'application/json',
+        },
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      if (!res.ok) {
+        const txt = await res.text();
+        lastError = new Error(`MAL API returned ${res.status}: ${txt}`);
+        // Retry on MAL server errors and rate limits
+        if ((res.status >= 500 || res.status === 429) && attempt < retries) {
+          await new Promise(r => setTimeout(r, 300));
+          continue;
+        }
+        throw lastError;
+      }
+      const data = await res.json();
+      cache.set(cacheKey, data);
+      return data;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      lastError = error;
+      if (error.name === 'AbortError') {
+        lastError = new Error('MAL API request timed out');
+        if (attempt < retries) {
+          await new Promise(r => setTimeout(r, 300));
+          continue;
+        }
+      }
+      if (attempt < retries) {
+        await new Promise(r => setTimeout(r, 300));
+        continue;
+      }
+      throw lastError;
     }
-  }
-
-  evictCache();
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
-
-  try {
-    const res = await fetch(url, {
-      headers: {
-        'X-MAL-CLIENT-ID': MAL_CLIENT_ID,
-        'Accept': 'application/json',
-      },
-      signal: controller.signal
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!res.ok) {
-      const txt = await res.text();
-      throw new Error(`MAL API returned ${res.status}: ${txt}`);
-    }
-
-    const data = await res.json();
-    cache.set(cacheKey, { data, timestamp: Date.now() });
-    return data;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    if (error.name === 'AbortError') {
-      throw new Error('MAL API request timed out');
-    }
-    throw error;
   }
 }
 
-// ─── Normaliser ───────────────────────────────────────────────
-function normalize(raw) {
-  if (!raw) return null;
-  const n = raw.node || raw;
+/**
+ * Fetches and distills episode metadata from AniZip for a MAL id.
+ * Returns the distilled episode array, or null when AniZip has no record.
+ * Never throws — callers treat null as "no AniZip data available".
+ * @param {string|number} malId - MAL anime id
+ * @returns {Promise<Array|null>}
+ */
+async function anizipFetch(malId, retries = 1) {
+  const cacheKey = String(malId);
+  const cached = anizipCache.get(cacheKey);
+  if (cached !== undefined) return cached;
 
-  const STATUS_MAP = {
-    currently_airing: 'RELEASING',
-    finished_airing: 'FINISHED',
-    not_yet_aired: 'NOT_YET_RELEASED',
-  };
+  const url = `${CONFIG.ANIZIP_BASE}/mappings?mal_id=${encodeURIComponent(malId)}`;
+  for (let attempt = 0; ; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), CONFIG.ANIZIP_TIMEOUT);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (res.status === 404) {
+        anizipCache.set(cacheKey, null);
+        return null;
+      }
+      if (!res.ok) {
+        if (res.status >= 500 && attempt < retries) {
+          await new Promise(r => setTimeout(r, 300));
+          continue;
+        }
+        return null;
+      }
+      const json = await res.json();
+      const distilled = distillAnizip(json?.episodes, json?.episodeCount);
+      anizipCache.set(cacheKey, distilled);
+      return distilled;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (attempt < retries) {
+        await new Promise(r => setTimeout(r, 300));
+        continue;
+      }
+      console.warn(`[anizip] fetch failed for mal ${malId}:`, error.message);
+      return null;
+    }
+  }
+}
 
+/**
+ * Fetches AniZip artwork for a MAL id.
+ * Returns null when AniZip has no mapping or the request fails.
+ */
+async function anizipArtworkFetch(malId, retries = 1) {
+  const cacheKey = String(malId);
+  const cached = anizipArtworkCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  const url = `${CONFIG.ANIZIP_BASE}/mappings?mal_id=${encodeURIComponent(malId)}`;
+  for (let attempt = 0; ; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), CONFIG.ANIZIP_TIMEOUT);
+    try {
+      const res = await fetch(url, {
+        headers: { 'Accept': 'application/json', 'User-Agent': 'AnimeTM/1.0' },
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (res.status === 404) {
+        anizipArtworkCache.set(cacheKey, null);
+        return null;
+      }
+      if (!res.ok) {
+        if (res.status >= 500 && attempt < retries) {
+          await new Promise(r => setTimeout(r, 300));
+          continue;
+        }
+        anizipArtworkCache.set(cacheKey, null);
+        return null;
+      }
+      const json = await res.json();
+      const artwork = distillAnizipArtwork(json?.images);
+      anizipArtworkCache.set(cacheKey, artwork);
+      return artwork;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (attempt < retries) {
+        await new Promise(r => setTimeout(r, 300));
+        continue;
+      }
+      console.warn(`[anizip artwork] fetch failed for mal ${malId}:`, error.message);
+      anizipArtworkCache.set(cacheKey, null);
+      return null;
+    }
+  }
+}
+
+async function enrichAnimeArtwork(anime) {
+  if (!anime || !anime.id) return anime;
+  const artwork = await anizipArtworkFetch(anime.malId || anime.id);
+  if (!artwork) return anime;
+
+  const poster = artwork.poster || anime.coverImage?.extraLarge || anime.coverImage?.large || '';
+  // Use AniZip fanart for the cinematic hero background; keep the poster
+  // artwork for cards and the hero poster panel.
+  const banner = artwork.fanart || artwork.banner || anime.bannerImage || poster;
   return {
-    id: n.id,
-    malId: n.id,
-    title: {
-      romaji: n.title || 'Unknown',
-      english: n.alternative_titles?.en || n.title || 'Unknown',
-      native: n.alternative_titles?.ja || n.title || 'Unknown',
-    },
+    ...anime,
     coverImage: {
-      extraLarge: n.main_picture?.large || n.main_picture?.medium || '',
-      large: n.main_picture?.medium || n.main_picture?.large || '',
+      ...anime.coverImage,
+      extraLarge: poster,
+      large: poster,
     },
-    bannerImage: n.main_picture?.large || '',
-    format: (n.media_type || 'tv').replace(/_/g, ' ').toUpperCase(),
-    status: STATUS_MAP[n.status] || 'FINISHED',
-    episodes: n.num_episodes || null,
-    averageScore: n.mean ? Math.round(n.mean * 10) : 0,
-    meanScore: n.mean ? Math.round(n.mean * 10) : 0,
-    seasonYear: n.start_season?.year || (n.start_date ? parseInt(n.start_date.slice(0, 4)) : null),
-    genres: (n.genres || []).map(g => g.name),
-    description: n.synopsis || '',
-    isAdult: n.rating === 'rx',
-    duration: n.average_episode_duration ? Math.round(n.average_episode_duration / 60) : null,
+    bannerImage: banner,
   };
 }
 
-// ─── Routes ───────────────────────────────────────────────────
+async function enrichAnimeList(items) {
+  return Promise.all((items || []).map(enrichAnimeArtwork));
+}
 
-// GET /api/spotlight  — top airing for hero + top10
-app.get('/api/spotlight', async (req, res) => {
+async function enrichRecentArtwork(item) {
+  if (!item || !item.id) return item;
+  const artwork = await anizipArtworkFetch(item.mal_id || item.malId || item.id);
+  if (!artwork) return item;
+  return {
+    ...item,
+    image: artwork.poster || item.image || '',
+    background_image: artwork.fanart || artwork.banner || item.background_image || artwork.poster || '',
+  };
+}
+
+/**
+ * Wrapper to handle route logic, caching headers, and common error responses.
+ * @param {express.Request} req - Express request
+ * @param {express.Response} res - Express response
+ * @param {Function} fetcher - Async function returning the payload to send
+ */
+async function routeHandler(req, res, fetcher) {
   try {
-    const date = new Date();
-    const year = date.getFullYear();
-    const month = date.getMonth(); // 0-11
-    let season = 'winter';
-    if (month >= 2 && month <= 4) season = 'spring';
-    else if (month >= 5 && month <= 7) season = 'summer';
-    else if (month >= 8 && month <= 10) season = 'fall';
+    const data = await fetcher();
+    res.set('Cache-Control', `public, max-age=${Math.floor(CONFIG.CACHE_TTL / 1000)}`);
+    res.json(data);
+  } catch (e) {
+    console.error(`[${req.path}]`, e.message);
+    if (res.headersSent) return;
+    const status = e.message.includes('timed out') ? 504 : 502;
+    res.status(status).json({ error: e.message });
+  }
+}
 
+// ─── Base Routes ──────────────────────────────────────────────
+app.get('/', (_, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
+
+// ─── API Routes: Discovery ────────────────────────────────────
+app.get('/api/spotlight', (req, res) => {
+  routeHandler(req, res, async () => {
+    const { year, season } = getCurrentSeason();
     const data = await malFetch(`/anime/season/${year}/${season}`, {
       sort: 'anime_score',
       limit: 10,
-      fields: STANDARD_FIELDS,
+      fields: FIELDS.STANDARD,
     });
-    res.json((data?.data ?? []).map(normalize));
-  } catch (e) {
-    console.error('[/api/spotlight]', e.message);
-    res.status(502).json({ error: e.message });
-  }
+    return enrichAnimeList((data?.data ?? []).map(normalize));
+  });
 });
 
-// GET /api/trending?page=1
-app.get('/api/trending', async (req, res) => {
-  try {
-    const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = 20;
+app.get('/api/trending', (req, res) => {
+  routeHandler(req, res, async () => {
+    const { limit, offset } = getPagination(req.query.page, 20);
     const data = await malFetch('/anime/ranking', {
       ranking_type: 'bypopularity',
       limit,
-      offset: (page - 1) * limit,
-      fields: STANDARD_FIELDS,
+      offset,
+      fields: FIELDS.STANDARD,
     });
-    res.json((data?.data ?? []).map(normalize));
-  } catch (e) {
-    console.error('[/api/trending]', e.message);
-    res.status(502).json({ error: e.message });
-  }
+    return enrichAnimeList((data?.data ?? []).map(normalize));
+  });
 });
 
-// GET /api/recent?page=1  — recent / this season
-app.get('/api/recent', async (req, res) => {
-  try {
-    const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = 24;
+app.get('/api/recent', (req, res) => {
+  routeHandler(req, res, async () => {
+    const page = parseInt(req.query.page || 1, 10);
+    const perPage = 24;
+
+    try {
+      const response = await fetch(`https://anikotoapi.site/recent-anime?page=${page}&per_page=${perPage}`);
+      if (!response.ok) throw new Error('Anikoto fetch failed');
+      const data = await response.json();
+
+      if (data && data.ok && Array.isArray(data.data)) {
+        const recentItems = data.data.map(item => {
+          if (item.mal_id && item.id) {
+            anikotoCache.set(String(item.mal_id), String(item.id));
+          }
+
+          return {
+            id: item.mal_id ? parseInt(item.mal_id, 10) : item.id,
+            title: item.title || item.native || 'Unknown',
+            image: item.poster || item.background_image || '',
+            type: item.terms_by_type?.type?.[0] || 'TV',
+            episodes: item.episodes || null,
+            score: item.score || null,
+            status: item.status || 'Finished Airing',
+            genres: item.terms_by_type?.genre || []
+          };
+        });
+        return Promise.all(recentItems.map(enrichRecentArtwork));
+      }
+    } catch (err) {
+      console.warn('Anikoto recent failed, falling back to MAL', err.message);
+    }
+
+    const { limit, offset } = getPagination(req.query.page, 24);
     const data = await malFetch('/anime/ranking', {
       ranking_type: 'airing',
       limit,
-      offset: (page - 1) * limit,
-      fields: STANDARD_FIELDS,
+      offset,
+      fields: FIELDS.STANDARD,
     });
-    res.json((data?.data ?? []).map(normalize));
-  } catch (e) {
-    console.error('[/api/recent]', e.message);
-    res.status(502).json({ error: e.message });
-  }
+    return enrichAnimeList((data?.data ?? []).map(normalize));
+  });
 });
 
-// GET /api/search?q=naruto&page=1
-app.get('/api/search', async (req, res) => {
-  const q = (req.query.q || '').trim();
-  if (!q) return res.json([]);
-  try {
-    const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = 20;
+app.get('/api/search', (req, res) => {
+  routeHandler(req, res, async () => {
+    const q = (req.query.q || '').trim();
+    if (!q) return [];
+    const { limit, offset } = getPagination(req.query.page, 20);
     const data = await malFetch('/anime', {
       q,
       limit,
-      offset: (page - 1) * limit,
-      fields: STANDARD_FIELDS,
+      offset,
+      fields: FIELDS.STANDARD,
     });
-    res.json((data?.data ?? []).map(normalize));
-  } catch (e) {
-    console.error('[/api/search]', e.message);
-    res.status(502).json({ error: e.message });
-  }
+    return enrichAnimeList((data?.data ?? []).map(normalize));
+  });
 });
 
-// GET /api/browse?category=airing&page=1
-app.get('/api/browse', async (req, res) => {
-  const catMap = {
-    movie: 'movie',
-    tv: 'tv',
-    airing: 'airing',
-    bypopularity: 'bypopularity',
-  };
-  try {
+app.get('/api/browse', (req, res) => {
+  routeHandler(req, res, async () => {
+    const catMap = {
+      movie: 'movie',
+      tv: 'tv',
+      airing: 'airing',
+      bypopularity: 'bypopularity',
+    };
     const cat = catMap[req.query.category] ?? 'bypopularity';
-    const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = 24;
+    const { limit, offset } = getPagination(req.query.page, 24);
     const data = await malFetch('/anime/ranking', {
       ranking_type: cat,
       limit,
-      offset: (page - 1) * limit,
-      fields: STANDARD_FIELDS,
+      offset,
+      fields: FIELDS.STANDARD,
     });
-    res.json({
-      results: (data?.data ?? []).map(normalize),
+    return {
+      results: await enrichAnimeList((data?.data ?? []).map(normalize)),
       hasNextPage: !!data?.paging?.next,
-    });
-  } catch (e) {
-    console.error('[/api/browse]', e.message);
-    res.status(502).json({ error: e.message });
-  }
+    };
+  });
 });
 
-// GET /api/anime/:id  — full details
-app.get('/api/anime/:id', async (req, res) => {
-  try {
-    const data = await malFetch(`/anime/${req.params.id}`, {
-      fields: STANDARD_FIELDS + ',' + RELATION_FIELDS,
+// ─── API Routes: Details ──────────────────────────────────────
+app.get('/api/anime/:id', (req, res) => {
+  routeHandler(req, res, async () => {
+    const malId = String(req.params.id).replace(/[^0-9]/g, '');
+    if (!malId) throw new Error('Invalid anime ID');
+    const data = await malFetch(`/anime/${malId}`, {
+      fields: FIELDS.STANDARD,
     });
-    res.json(normalize(data));
-  } catch (e) {
-    console.error('[/api/anime/:id]', e.message);
-    res.status(502).json({ error: e.message });
-  }
+    return enrichAnimeArtwork(normalize(data));
+  });
 });
 
-// GET /api/anime/:id/episodes
-app.get('/api/anime/:id/episodes', async (req, res) => {
-  const animeId = req.params.id;
-  try {
-    const data = await malFetch(`/anime/${animeId}`, { fields: 'num_episodes,status,alternative_titles' });
-    let total = data?.num_episodes || 0;
-    const status = data?.status;
+app.get('/api/anime/:id/related', (req, res) => {
+  routeHandler(req, res, async () => {
+    const malId = String(req.params.id).replace(/[^0-9]/g, '');
+    if (!malId) throw new Error('Invalid anime ID');
 
-    // Special handling for One Piece (MAL ID: 21)
-    if (animeId === '21') {
-      // One Piece has ~1100+ episodes on MAL but usually more on streaming.
-      // We take the max of MAL count and a safe buffer if it's currently airing.
-      if (status === 'currently_airing') {
-        // If MAL reports a count, we add a small buffer for the very latest episodes
-        // that might not be synced to MAL yet.
-        total = Math.max(total, 1150);
+    const cacheKey = String(malId);
+    const cached = relatedSeriesCache.get(cacheKey);
+    if (cached) return cached;
+
+    const payload = await aggregateRelatedSeries(malId, {
+      maxDepth: 3,
+      overrides: relationOverrides,
+      fetchAnime: (id) => malFetch(`/anime/${id}`, { fields: FIELDS.RELATED }),
+    });
+    relatedSeriesCache.set(cacheKey, payload);
+    return payload;
+  });
+});
+
+app.get('/api/anime/:id/episodes', (req, res) => {
+  routeHandler(req, res, async () => {
+    const malId = String(req.params.id).replace(/[^0-9]/g, "");
+    if (!malId) throw new Error("Invalid anime ID");
+
+    // 1. Provider (anikoto) episodes — authoritative for stream embed ids
+    let anikoto = null;
+    const anikotoId = anikotoCache.get(String(malId));
+    if (anikotoId) {
+      try {
+        const response = await fetch(`https://anikotoapi.site/series/${anikotoId}`);
+        if (response.ok) {
+          const json = await response.json();
+          if (json.ok && json.data && Array.isArray(json.data.episodes)) {
+            anikoto = json.data.episodes.map(ep => ({
+              id: ep.number,
+              title: ep.title || '',
+              image: '',
+              airedAt: null,
+              embed_id: ep.episode_embed_id || null
+            }));
+          }
+        }
+      } catch (err) {
+        console.warn(`Anikoto episode fetch failed for malId ${malId}`, err.message);
       }
     }
 
-    // Generic fallback for currently airing anime with 0 episodes in MAL
-    if (status === 'currently_airing' && total === 0) {
-      total = 1000; // Large buffer for ongoing shows with unknown length
+    // 2. AniZip metadata — real titles, air dates, runtime, absolute numbers
+    const anizip = await anizipFetch(malId);
+
+    // 3. MAL synthetic list, only needed when neither source produced episodes
+    let mal = null;
+    if (!(anikoto && anikoto.length) && !(anizip && anizip.length)) {
+      const data = await malFetch(`/anime/${malId}`, {
+        fields: 'num_episodes,status,start_date'
+      });
+      if (data?.status === 'not_yet_aired') return [];
+
+      let total = data?.num_episodes || 0;
+      const airing = data?.status === 'currently_airing' ? getAiringEpisode(data?.start_date) : null;
+
+      if (airing) {
+        total = total > 0 ? Math.min(total, airing.episode) : airing.episode;
+      }
+      if (total === 0) total = 12; // Fallback
+
+      const start = data?.start_date ? new Date(data.start_date) : null;
+      mal = Array.from({ length: total }, (_, i) => {
+        let airedAt = null;
+        if (start && !isNaN(start.getTime())) {
+          airedAt = new Date(start.getTime() + i * 7 * 24 * 60 * 60 * 1000).toISOString();
+        }
+        return { id: i + 1, title: `Episode ${i + 1}`, image: '', airedAt };
+      });
     }
 
-    // Default fallback
-    if (total === 0) total = 12;
-
-    res.json(
-      Array.from({ length: total }, (_, i) => ({
-        id: i + 1,
-        title: `Episode ${i + 1}`,
-        image: '',
-      }))
-    );
-  } catch (e) {
-    console.error('[/api/anime/:id/episodes]', e.message);
-    res.status(502).json({ error: e.message });
-  }
+    return buildEpisodeList({ anikoto, anizip, mal });
+  });
 });
 
-// GET /api/anime/:id/seasons
-app.get('/api/anime/:id/seasons', async (req, res) => {
-  try {
-    const data = await malFetch(`/anime/${req.params.id}`, { fields: RELATION_FIELDS });
+app.get('/api/anime/:id/airing-episode', (req, res) => {
+  routeHandler(req, res, async () => {
+    const malId = String(req.params.id).replace(/[^0-9]/g, '');
+    if (!malId) throw new Error('Invalid anime ID');
+    const data = await malFetch(`/anime/${malId}`, {});
+    const status = data?.status;
+    const total = data?.num_episodes || 0;
+    const airing = status === 'currently_airing' ? getAiringEpisode(data?.start_date) : null;
+    return {
+      currentEpisode: airing ? airing.episode : (status === 'finished_airing' ? total : 0),
+      totalEpisodes: total || 12,
+      status: STATUS_MAP[status] || 'FINISHED'
+    };
+  });
+});
+
+app.get('/api/anime/:id/seasons', (req, res) => {
+  routeHandler(req, res, async () => {
+    const malId = String(req.params.id).replace(/[^0-9]/g, '');
+    if (!malId) throw new Error('Invalid anime ID');
+    const data = await malFetch(`/anime/${malId}`, { fields: FIELDS.RELATION });
     const valid = new Set(['prequel', 'sequel', 'alternative_version', 'parent_story', 'side_story']);
-    const list = (data?.related_anime ?? [])
+    return enrichAnimeList((data?.related_anime ?? [])
       .filter(r => valid.has(r.relation_type) && r.node)
-      .map(r => normalize(r.node));
-    res.json(list);
-  } catch (e) {
-    console.error('[/api/anime/:id/seasons]', e.message);
-    res.status(502).json({ error: e.message });
-  }
+      .map(r => ({ ...normalize(r.node), relationType: r.relation_type })));
+  });
 });
-
-// ─── Health check ─────────────────────────────────────────────
-app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
 // ─── Global Error Handler ──────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('[Global Error]', err.stack);
+  if (res.headersSent) return next(err);
   res.status(500).json({
     error: 'Internal Server Error',
     message: err.message
   });
 });
 
-// ─── Start ────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`\n  ✅  AnimeTM Proxy running → http://localhost:${PORT}`);
+// ─── Start Server ─────────────────────────────────────────────
+app.listen(CONFIG.PORT, () => {
+  console.log(`\n  ✅  AnimeTM Proxy running → http://localhost:${CONFIG.PORT}`);
   console.log(`  📡  Forwarding MAL API requests with Client ID\n`);
 });

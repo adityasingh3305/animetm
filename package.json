@@ -5,11 +5,23 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "test": "jest"
   },
   "dependencies": {
     "compression": "^1.8.1",
     "cors": "^2.8.5",
-    "express": "^4.19.2"
-  }
+    "dotenv": "^17.4.2",
+    "express": "^4.19.2",
+    "express-rate-limit": "^8.4.0",
+    "helmet": "^8.1.0",
+    "lru-cache": "^11.3.5"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
 }
